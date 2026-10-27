@@ -240,4 +240,22 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()
+    main()import os
+from telegram.ext import Application
+
+# ... your existing code ...
+
+if __name__ == '__main__':
+    # For Render.com deployment - keep alive
+    PORT = int(os.environ.get('PORT', 5000))
+
+    # If you want webhooks (recommended for Render):
+    # application.run_webhook(
+    #     listen="0.0.0.0",
+    #     port=PORT,
+    #     url_path=BOT_TOKEN,
+    #     webhook_url=f"https://your-app-name.onrender.com/{BOT_TOKEN}"
+    # )
+
+    # Or polling mode (works but needs UptimeRobot):
+    application.run_polling()
