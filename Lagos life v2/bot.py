@@ -1,3 +1,25 @@
+# Render keep-alive: starts before any bot code runs, so Render sees an open port.
+import os as _os_early
+import threading as _threading_early
+from http.server import BaseHTTPRequestHandler as _BH_early, ThreadingHTTPServer as _THS_early
+class _RenderEarlyKeepAlive(_BH_early):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+try:
+    _port_early = int(_os_early.environ.get('PORT', '10000'))
+    _srv_early = _THS_early(('0.0.0.0', _port_early), _RenderEarlyKeepAlive)
+    _t_early = _threading_early.Thread(target=_srv_early.serve_forever, daemon=True)
+    _t_early.start()
+except Exception:
+    pass
 import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
