@@ -240,10 +240,35 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()import os
+    main()
+import os
 from telegram.ext import Application
 
 # ... your existing code ...
+
+# Tiny keep-alive web server (stdlib only): answers GET / and /health with 200 OK
+# so Render sees an open port and UptimeRobot has an endpoint to ping.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+
+
+class _KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _start_keep_alive_server(port):
+    server = ThreadingHTTPServer(("0.0.0.0", port), _KeepAliveHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
 
 if __name__ == '__main__':
     # For Render.com deployment - keep alive
@@ -258,4 +283,6 @@ if __name__ == '__main__':
     # )
 
     # Or polling mode (works but needs UptimeRobot):
+    # Start the keep-alive server before polling so Render/UptimeRobot can ping it.
+    _keep_alive_server = _start_keep_alive_server(PORT)
     application.run_polling()
