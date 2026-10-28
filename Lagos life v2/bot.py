@@ -1,310 +1,356 @@
-# Render keep-alive: starts before any bot code runs, so Render sees an open port.
-import os as _os_early
-import threading as _threading_early
-from http.server import BaseHTTPRequestHandler as _BH_early, ThreadingHTTPServer as _THS_early
-class _RenderEarlyKeepAlive(_BH_early):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'OK')
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-    def log_message(self, *args):
-        pass
-try:
-    _port_early = int(_os_early.environ.get('PORT', '10000'))
-    _srv_early = _THS_early(('0.0.0.0', _port_early), _RenderEarlyKeepAlive)
-    _t_early = _threading_early.Thread(target=_srv_early.serve_forever, daemon=True)
-    _t_early.start()
-except Exception:
-    pass
 import asyncio
-import logging
+import threading
+import time
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
-from config import BOT_TOKEN
-from exploit import LagosLifeNuke
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
+)
+from config   import BOT_TOKEN
+from exploit  import LagosLifeExploit
 
-# Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Conversation states
+ASK_USER, ASK_PASS, ASK_AMOUNT = range(3)
 
-# States for conversation
-USERNAME, PASSWORD, AMOUNT = range(3)
+# Per-chat sessions  {chat_id: {"exploit": ..., "target": int}}
+sessions: dict[int, dict] = {}
 
-# Store active sessions
-user_sessions = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message"""
-    keyboard = [
-        [InlineKeyboardButton("🔐 Login to Lagos Life", callback_data='login')],
-        [InlineKeyboardButton("💰 Check Balance", callback_data='balance')],
-        [InlineKeyboardButton("💉 Inject Money", callback_data='inject')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+# ── /start ────────────────────────────────────────────────────────────────────
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton("🔐 Login to Lagos Life", callback_data="login")]]
     await update.message.reply_text(
-        "🏙 **LAGOS LIFE NUKE v4.0 (Onyx Edition)**\n\n"
-        "• TLS Fingerprint Bypass (Cloudflare)\n"
-        "• Chunked Injection (No 409 Safe Mode)\n"
-        "• Live Progress Tracking\n\n"
-        "Select an option:",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
+        "🏙 *Lagos Life Inject Tool*\n\n"
+        "Verified. Confirmed working.\n"
+        "Tap Login to begin.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
     )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == 'login':
-        await query.message.reply_text(
-            "🔐 **Enter your Lagos Life username or email:**",
-            parse_mode='Markdown'
-        )
-        return USERNAME
-        
-    elif query.data == 'balance':
-        user_id = query.from_user.id
-        if user_id not in user_sessions:
-            await query.message.reply_text("❌ Not logged in! Use /start to login first.")
-            return
-        await query.message.reply_text("💰 Fetching balance...")
-        balance = await asyncio.to_thread(user_sessions[user_id]['api']._extract_balance)
-        await query.message.reply_text(f"💰 **Current Balance:** ₦{balance:,}", parse_mode='Markdown')
-        return
-        
-    elif query.data == 'inject':
-        user_id = query.from_user.id
-        if user_id not in user_sessions:
-            await query.message.reply_text("❌ Not logged in! Use /start to login first.")
-            return
-        await query.message.reply_text(
-            "💉 **Enter target amount**\n\n"
-            "Examples:\n"
-            "• `5000000` (5M)\n"
-            "• `5000000000` (5B)\n"
-            "• `10000000000` (10B)",
-            parse_mode='Markdown'
-        )
-        return AMOUNT
 
-async def got_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store username and ask for password"""
-    context.user_data['username'] = update.message.text.strip()
-    await update.message.reply_text(
-        "🔑 **Enter password:**",
-        parse_mode='Markdown'
+# ── login flow ────────────────────────────────────────────────────────────────
+
+async def cb_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "Enter your *Lagos Life username*:", parse_mode="Markdown"
     )
-    return PASSWORD
+    return ASK_USER
 
-async def got_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Attempt login"""
-    username = context.user_data.get('username')
-    password = update.message.text.strip()
-    user_id = update.message.from_user.id
-    
-    msg = await update.message.reply_text("⏳ **Authenticating (Bypassing CF)...**", parse_mode='Markdown')
-    
-    # Initialize API and run login in a background thread so the bot doesn't freeze
-    api = LagosLifeNuke()
-    result = await asyncio.to_thread(api.login, username, password)
-    
-    if result['success']:
-        # Store session
-        user_sessions[user_id] = {
-            'api': api,
-            'username': username
-        }
-        
-        keyboard = [
-            [InlineKeyboardButton("💉 Inject Money", callback_data='inject')],
-            [InlineKeyboardButton("💰 Check Balance", callback_data='balance')]
-        ]
-        
-        await msg.edit_text(
-            f"✅ **Login Successful!**\n\n"
-            f"👤 User: `{username}`\n"
-            f"💰 Current Balance: **₦{result.get('balance', 0):,}**\n\n"
-            f"Ready to inject. Select an option:",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await msg.edit_text(
-            f"❌ **Login Failed**\n\n"
-            f"Error: `{result.get('error', 'Unknown')}`\n\n"
-            f"Try again with /start",
-            parse_mode='Markdown'
-        )
-    return ConversationHandler.END
 
-async def got_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process the injection amount"""
-    user_id = update.message.from_user.id
-    
-    if user_id not in user_sessions:
-        await update.message.reply_text("❌ Session expired. Login again with /start")
+async def got_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["ll_user"] = update.message.text.strip()
+    await update.message.reply_text("Now enter your *password*:", parse_mode="Markdown")
+    return ASK_PASS
+
+
+async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cid  = update.effective_chat.id
+    user = ctx.user_data.get("ll_user", "")
+    pw   = update.message.text.strip()
+
+    msg  = await update.message.reply_text("⏳ Logging in...")
+
+    exploit = LagosLifeExploit()
+    result  = await asyncio.to_thread(exploit.login, user, pw)
+
+    if not result["success"]:
+        await msg.edit_text(
+            f"❌ Login failed: `{result.get('error', 'unknown')}`",
+            parse_mode="Markdown",
+        )
         return ConversationHandler.END
-    
-    try:
-        amount = int(update.message.text.strip().replace(',', '').replace('₦', ''))
-    except ValueError:
-        await update.message.reply_text("❌ Invalid amount. Enter numbers only.")
-        return AMOUNT
-    
-    # Confirmation keyboard
-    keyboard = [
-        [InlineKeyboardButton("🚀 CONFIRM NUKE", callback_data=f'confirm_{amount}')]
-    ]
-    
-    await update.message.reply_text(
-        f"🎯 **Target Amount:** ₦{amount:,}\n\n"
-        f"Method: Chunked Save Injection\n"
-        f"Bypass: TLS Spoofing + Thread-safe async\n\n"
-        f"Ready?",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+
+    # Get balance
+    state   = await asyncio.to_thread(exploit.get_state)
+    balance = state["game"].get("money", 0) if state["success"] else 0
+
+    sessions[cid] = {"exploit": exploit, "target": 0}
+
+    kb = [[
+        InlineKeyboardButton("💉 Set Amount & Inject", callback_data="setamount"),
+        InlineKeyboardButton("💰 Check Balance",       callback_data="balance"),
+    ]]
+    await msg.edit_text(
+        f"✅ *Logged in!*\n\n"
+        f"Current balance: `₦{balance:,}`\n\n"
+        f"Choose action 👇",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
     )
     return ConversationHandler.END
 
-async def confirm_inject(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Execute the nuke"""
-    query = update.callback_query
-    await query.answer()
-    
-    amount = int(query.data.split('_')[1])
-    user_id = query.from_user.id
-    
-    if user_id not in user_sessions: 
-        await query.message.reply_text("❌ Session expired.")
-        return
-    
-    api = user_sessions[user_id]['api']
-    msg = await query.message.reply_text("⚡ **INJECTION STARTED...**\n\n[░░░░░░░░░░] 0%", parse_mode='Markdown')
-    
-    # Get the current event loop
-    loop = asyncio.get_running_loop()
 
-    # Thread-safe progress callback
-    def update_progress(current, target, step, total_steps):
-        percent = int((step / total_steps) * 100)
-        bar = "█" * (percent // 10) + "░" * (10 - (percent // 10))
-        
-        text = (
-            f"⚡ **INJECTING PAYLOAD...**\n\n"
-            f"[{bar}] {percent}%\n"
-            f"💰 Current: ₦{current:,} / ₦{target:,}"
+# ── balance check ─────────────────────────────────────────────────────────────
+
+async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    cid = update.effective_chat.id
+
+    if cid not in sessions:
+        await update.callback_query.message.reply_text("Not logged in. Use /start.")
+        return
+
+    exploit = sessions[cid]["exploit"]
+    state   = await asyncio.to_thread(exploit.get_state)
+    balance = state["game"].get("money", "unknown") if state["success"] else "error"
+
+    kb = [[InlineKeyboardButton("💉 Inject", callback_data="setamount")]]
+    await update.callback_query.message.reply_text(
+        f"💰 Balance: `₦{balance:,}`" if isinstance(balance, int) else f"💰 Balance: `{balance}`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+# ── set amount flow ───────────────────────────────────────────────────────────
+
+async def cb_setamount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    cid = update.effective_chat.id
+
+    if cid not in sessions:
+        await update.callback_query.message.reply_text("Not logged in. Use /start.")
+        return ConversationHandler.END
+
+    await update.callback_query.message.reply_text(
+        "Enter target balance (e.g. `5000000000` for 5B):",
+        parse_mode="Markdown",
+    )
+    return ASK_AMOUNT
+
+
+async def got_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    try:
+        amount = int(
+            update.message.text.strip()
+            .replace(",", "")
+            .replace("₦", "")
+            .replace(" ", "")
         )
-        
-        async def safe_edit():
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Try again — /start")
+        return ConversationHandler.END
+
+    sessions[cid]["target"] = amount
+
+    kb = [[
+        InlineKeyboardButton("🚀 START INJECT", callback_data="inject"),
+        InlineKeyboardButton("❌ Cancel",        callback_data="cancel"),
+    ]]
+    await update.message.reply_text(
+        f"🎯 *Target set:* `₦{amount:,}`\n\n"
+        f"Strategy:\n"
+        f"• Starts at 50M per cycle\n"
+        f"• Doubles every 3 confirmed writes\n"
+        f"• 409? Auto re-sync + halve chunk\n"
+        f"• Server timestamp chained (no wasted GETs)\n\n"
+        f"Hit *START INJECT* 🚀",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+    return ConversationHandler.END
+
+
+# ── inject ────────────────────────────────────────────────────────────────────
+
+async def cb_inject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    cid = update.effective_chat.id
+
+    if cid not in sessions:
+        await update.callback_query.message.reply_text("Not logged in.")
+        return
+
+    exploit = sessions[cid]["exploit"]
+    target  = sessions[cid]["target"]
+
+    msg = await update.callback_query.message.reply_text(
+        f"💉 *Injection starting...*\nTarget: `₦{target:,}`",
+        parse_mode="Markdown",
+    )
+
+    # Shared progress state (written from thread, read by loop)
+    prog = {
+        "cycle"    : 0,
+        "success"  : 0,
+        "injected" : 0,
+        "balance"  : 0,
+        "status"   : "STARTING",
+        "last_edit": 0.0,
+        "dirty"    : False,
+    }
+    prog_lock = threading.Lock()
+    loop      = asyncio.get_event_loop()
+
+    def on_progress(cycle, success_count, injected, balance, status):
+        with prog_lock:
+            prog.update({
+                "cycle"   : cycle,
+                "success" : success_count,
+                "injected": injected,
+                "balance" : balance,
+                "status"  : status,
+                "dirty"   : True,
+            })
+
+    # Background task — throttled Telegram edits
+    update_task_done = asyncio.Event()
+
+    async def update_ticker():
+        while True:
+            await asyncio.sleep(2.5)
+            with prog_lock:
+                if not prog["dirty"]:
+                    continue
+                c  = prog["cycle"]
+                sc = prog["success"]
+                inj = prog["injected"]
+                bal = prog["balance"]
+                st  = prog["status"]
+                prog["dirty"] = False
+
+            bar_pct = min(int(inj / target * 100), 100) if target else 0
+            filled  = bar_pct // 10
+            bar     = "█" * filled + "░" * (10 - filled)
+
+            text = (
+                f"💉 *Injecting...*\n\n"
+                f"`Cycle   :` `{c}`\n"
+                f"`Success :` `{sc}`\n"
+                f"`Injected:` `₦{inj:,}`\n"
+                f"`Balance :` `₦{bal:,}`\n"
+                f"`Target  :` `₦{target:,}`\n"
+                f"`Status  :` `{st}`\n\n"
+                f"`{bar}` {bar_pct}%"
+            )
+            kb = [[InlineKeyboardButton("🛑 STOP", callback_data="stop_inject")]]
             try:
-                await msg.edit_text(text, parse_mode='Markdown')
+                await msg.edit_text(
+                    text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                )
             except Exception:
-                # Catch 'Message is not modified' or FloodWait errors
                 pass
 
-        # Push the edit to the main asyncio loop from the worker thread
-        asyncio.run_coroutine_threadsafe(safe_edit(), loop)
+            if update_task_done.is_set():
+                break
 
-    # Execute the heavy injection loop in a thread
-    result = await asyncio.to_thread(api.nuke_balance, amount, update_progress)
-    
-    if result['success']:
-        await msg.edit_text(
-            f"✅ **INJECTION COMPLETE!**\n\n"
-            f"💰 **Final Balance:** ₦{result['new_balance']:,}\n"
-            f"Refresh your Lagos Life dashboard baby. We just beat his bot. 6767.",
-            parse_mode='Markdown'
-        )
-    else:
-        await msg.edit_text(
-            f"❌ **INJECTION FAILED**\n\n"
-            f"Error: `{result.get('error')}`\n\n"
-            f"The server may have patched this. Try again later.",
-            parse_mode='Markdown'
+    ticker = asyncio.ensure_future(update_ticker())
+
+    def run_inject():
+        result = exploit.inject(target, progress_cb=on_progress)
+
+        done    = result.get("done", False)
+        stopped = result.get("stopped", False)
+        fin_bal = result.get("final_balance", 0)
+        inj     = result.get("injected", 0)
+        cycles  = result.get("cycles", 0)
+
+        icon = "✅" if done else ("⏹" if stopped else "⚠️")
+        word = "Complete!" if done else ("Stopped." if stopped else "Ended early.")
+
+        kb = [[
+            InlineKeyboardButton("🔄 Inject Again", callback_data="setamount"),
+            InlineKeyboardButton("💰 Balance",       callback_data="balance"),
+        ]]
+
+        asyncio.run_coroutine_threadsafe(update_task_done.set(), loop)
+        asyncio.run_coroutine_threadsafe(
+            msg.edit_text(
+                f"{icon} *{word}*\n\n"
+                f"Final balance: `₦{fin_bal:,}`\n"
+                f"Injected:      `₦{inj:,}`\n"
+                f"Cycles:        `{cycles}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb),
+            ),
+            loop,
         )
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel operation"""
-    await update.message.reply_text("❌ Operation cancelled. Type /start to begin again.")
+    threading.Thread(target=run_inject, daemon=True).start()
+
+
+# ── stop ──────────────────────────────────────────────────────────────────────
+
+async def cb_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("Stopping...")
+    cid = update.effective_chat.id
+    if cid in sessions:
+        sessions[cid]["exploit"].stop()
+    await update.callback_query.message.reply_text(
+        "🛑 Stop signal sent. Finishing current cycle..."
+    )
+
+
+async def cb_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("Cancelled.")
     return ConversationHandler.END
 
-def main():
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Conversation handler for login flow
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern='^(login|balance|inject)$')],
-        states={
-            USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_username)],
-            PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_password)],
-            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=True,
-        per_user=True
-    )
-    
-    # Confirm injection handler
-    application.add_handler(CallbackQueryHandler(confirm_inject, pattern='^confirm_'))
-    
-    # Start handler
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(conv_handler)
-    
-    # Run bot
-    print("🤖 Lagos Life Nuke v4.0 (Onyx Edition) is live...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-    main()
-import os
-from telegram.ext import Application
+# ── health check server (for UptimeRobot + Render) ───────────────────────────
 
-# ... your existing code ...
-
-# Tiny keep-alive web server (stdlib only): answers GET / and /health with 200 OK
-# so Render sees an open port and UptimeRobot has an endpoint to ping.
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import threading
-
-
-class _KeepAliveHandler(BaseHTTPRequestHandler):
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
-        pass
+        pass  # silence access logs
 
 
-def _start_keep_alive_server(port):
-    server = ThreadingHTTPServer(("0.0.0.0", port), _KeepAliveHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server
+def start_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"Health check running on port {port}")
+    server.serve_forever()
 
 
-if __name__ == '__main__':
-    # For Render.com deployment - keep alive
-    PORT = int(os.environ.get('PORT', 5000))
+# ── wiring ────────────────────────────────────────────────────────────────────
 
-    # If you want webhooks (recommended for Render):
-    # application.run_webhook(
-    #     listen="0.0.0.0",
-    #     port=PORT,
-    #     url_path=BOT_TOKEN,
-    #     webhook_url=f"https://your-app-name.onrender.com/{BOT_TOKEN}"
-    # )
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    # Or polling mode (works but needs UptimeRobot):
-    # Start the keep-alive server before polling so Render/UptimeRobot can ping it.
-    _keep_alive_server = _start_keep_alive_server(PORT)
-    application.run_polling()
+    login_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_login, pattern="^login$")],
+        states={
+            ASK_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_username)],
+            ASK_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_password)],
+        },
+        fallbacks=[],
+        per_chat=True,
+    )
+
+    amount_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_setamount, pattern="^setamount$")],
+        states={
+            ASK_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_amount)],
+        },
+        fallbacks=[],
+        per_chat=True,
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(login_conv)
+    app.add_handler(amount_conv)
+    app.add_handler(CallbackQueryHandler(cb_balance,   pattern="^balance$"))
+    app.add_handler(CallbackQueryHandler(cb_inject,    pattern="^inject$"))
+    app.add_handler(CallbackQueryHandler(cb_stop,      pattern="^stop_inject$"))
+    app.add_handler(CallbackQueryHandler(cb_cancel,    pattern="^cancel$"))
+
+    # Start health check server in background (for Render + UptimeRobot)
+    threading.Thread(target=start_health_server, daemon=True).start()
+
+    print("Bot is running...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
