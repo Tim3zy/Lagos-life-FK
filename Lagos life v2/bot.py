@@ -8,13 +8,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
 )
-from config   import BOT_TOKEN
-from exploit  import LagosLifeExploit
+from config  import BOT_TOKEN, BASE_URL
+from exploit import LagosLifeExploit
 
-# Conversation states
 ASK_USER, ASK_PASS, ASK_AMOUNT = range(3)
-
-# Per-chat sessions  {chat_id: {"exploit": ..., "target": int}}
 sessions: dict[int, dict] = {}
 
 
@@ -23,9 +20,7 @@ sessions: dict[int, dict] = {}
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("🔐 Login to Lagos Life", callback_data="login")]]
     await update.message.reply_text(
-        "🏙 *Lagos Life Inject Tool*\n\n"
-        "Verified. Confirmed working.\n"
-        "Tap Login to begin.",
+        "🏙 *Lagos Life Inject Tool*\n\nTap Login to begin.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb),
     )
@@ -52,7 +47,7 @@ async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = ctx.user_data.get("ll_user", "")
     pw   = update.message.text.strip()
 
-    msg  = await update.message.reply_text("⏳ Logging in...")
+    msg = await update.message.reply_text("⏳ Logging in...")
 
     exploit = LagosLifeExploit()
     result  = await asyncio.to_thread(exploit.login, user, pw)
@@ -64,11 +59,19 @@ async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # Get balance
+    cookies = result.get("cookies", {})
     state   = await asyncio.to_thread(exploit.get_state)
     balance = state["game"].get("money", 0) if state["success"] else 0
 
     sessions[cid] = {"exploit": exploit, "target": 0}
+
+    # Show which cookies we got
+    got = [c for c in ("ll_session", "ll_pass", "ll_dev", "ll_vid") if c in cookies]
+    missing = [c for c in ("ll_session", "ll_pass", "ll_dev", "ll_vid") if c not in cookies]
+
+    cookie_line = f"Cookies: `{', '.join(got)}`"
+    if missing:
+        cookie_line += f"\n⚠️ Missing: `{', '.join(missing)}`"
 
     kb = [[
         InlineKeyboardButton("💉 Set Amount & Inject", callback_data="setamount"),
@@ -76,7 +79,8 @@ async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ]]
     await msg.edit_text(
         f"✅ *Logged in!*\n\n"
-        f"Current balance: `₦{balance:,}`\n\n"
+        f"Balance: `₦{balance:,}`\n"
+        f"{cookie_line}\n\n"
         f"Choose action 👇",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -84,14 +88,13 @@ async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── balance check ─────────────────────────────────────────────────────────────
+# ── balance ───────────────────────────────────────────────────────────────────
 
 async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     cid = update.effective_chat.id
-
     if cid not in sessions:
-        await update.callback_query.message.reply_text("Not logged in. Use /start.")
+        await update.callback_query.message.reply_text("Not logged in. /start first.")
         return
 
     exploit = sessions[cid]["exploit"]
@@ -106,14 +109,13 @@ async def cb_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── set amount flow ───────────────────────────────────────────────────────────
+# ── set amount ────────────────────────────────────────────────────────────────
 
 async def cb_setamount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     cid = update.effective_chat.id
-
     if cid not in sessions:
-        await update.callback_query.message.reply_text("Not logged in. Use /start.")
+        await update.callback_query.message.reply_text("Not logged in. /start first.")
         return ConversationHandler.END
 
     await update.callback_query.message.reply_text(
@@ -128,12 +130,10 @@ async def got_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         amount = int(
             update.message.text.strip()
-            .replace(",", "")
-            .replace("₦", "")
-            .replace(" ", "")
+            .replace(",", "").replace("₦", "").replace(" ", "")
         )
     except ValueError:
-        await update.message.reply_text("❌ Invalid number. Try again — /start")
+        await update.message.reply_text("❌ Invalid number.")
         return ConversationHandler.END
 
     sessions[cid]["target"] = amount
@@ -143,12 +143,11 @@ async def got_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("❌ Cancel",        callback_data="cancel"),
     ]]
     await update.message.reply_text(
-        f"🎯 *Target set:* `₦{amount:,}`\n\n"
-        f"Strategy:\n"
-        f"• Starts at 50M per cycle\n"
+        f"🎯 *Target:* `₦{amount:,}`\n\n"
+        f"• Starts at 50M/cycle\n"
         f"• Doubles every 3 confirmed writes\n"
-        f"• 409? Auto re-sync + halve chunk\n"
-        f"• Server timestamp chained (no wasted GETs)\n\n"
+        f"• 409 auto re-sync + halve\n"
+        f"• Timestamp chained (no wasted GETs)\n\n"
         f"Hit *START INJECT* 🚀",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -170,53 +169,43 @@ async def cb_inject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     target  = sessions[cid]["target"]
 
     msg = await update.callback_query.message.reply_text(
-        f"💉 *Injection starting...*\nTarget: `₦{target:,}`",
+        f"💉 *Starting injection...*\nTarget: `₦{target:,}`",
         parse_mode="Markdown",
     )
 
-    # Shared progress state (written from thread, read by loop)
     prog = {
-        "cycle"    : 0,
-        "success"  : 0,
-        "injected" : 0,
-        "balance"  : 0,
-        "status"   : "STARTING",
-        "last_edit": 0.0,
-        "dirty"    : False,
+        "cycle": 0, "success": 0, "injected": 0,
+        "balance": 0, "status": "STARTING", "dirty": False,
     }
-    prog_lock = threading.Lock()
-    loop      = asyncio.get_event_loop()
+    prog_lock        = threading.Lock()
+    loop             = asyncio.get_event_loop()
+    update_task_done = asyncio.Event()
 
     def on_progress(cycle, success_count, injected, balance, status):
         with prog_lock:
             prog.update({
-                "cycle"   : cycle,
-                "success" : success_count,
-                "injected": injected,
-                "balance" : balance,
-                "status"  : status,
-                "dirty"   : True,
+                "cycle": cycle, "success": success_count,
+                "injected": injected, "balance": balance,
+                "status": status, "dirty": True,
             })
-
-    # Background task — throttled Telegram edits
-    update_task_done = asyncio.Event()
 
     async def update_ticker():
         while True:
             await asyncio.sleep(2.5)
             with prog_lock:
                 if not prog["dirty"]:
+                    if update_task_done.is_set():
+                        break
                     continue
-                c  = prog["cycle"]
-                sc = prog["success"]
+                c   = prog["cycle"]
+                sc  = prog["success"]
                 inj = prog["injected"]
                 bal = prog["balance"]
                 st  = prog["status"]
                 prog["dirty"] = False
 
             bar_pct = min(int(inj / target * 100), 100) if target else 0
-            filled  = bar_pct // 10
-            bar     = "█" * filled + "░" * (10 - filled)
+            bar     = "█" * (bar_pct // 10) + "░" * (10 - bar_pct // 10)
 
             text = (
                 f"💉 *Injecting...*\n\n"
@@ -231,8 +220,7 @@ async def cb_inject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton("🛑 STOP", callback_data="stop_inject")]]
             try:
                 await msg.edit_text(
-                    text,
-                    parse_mode="Markdown",
+                    text, parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(kb),
                 )
             except Exception:
@@ -241,11 +229,10 @@ async def cb_inject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if update_task_done.is_set():
                 break
 
-    ticker = asyncio.ensure_future(update_ticker())
+    asyncio.ensure_future(update_ticker())
 
     def run_inject():
-        result = exploit.inject(target, progress_cb=on_progress)
-
+        result  = exploit.inject(target, progress_cb=on_progress)
         done    = result.get("done", False)
         stopped = result.get("stopped", False)
         fin_bal = result.get("final_balance", 0)
@@ -259,7 +246,6 @@ async def cb_inject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔄 Inject Again", callback_data="setamount"),
             InlineKeyboardButton("💰 Balance",       callback_data="balance"),
         ]]
-
         asyncio.run_coroutine_threadsafe(update_task_done.set(), loop)
         asyncio.run_coroutine_threadsafe(
             msg.edit_text(
@@ -283,9 +269,7 @@ async def cb_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     if cid in sessions:
         sessions[cid]["exploit"].stop()
-    await update.callback_query.message.reply_text(
-        "🛑 Stop signal sent. Finishing current cycle..."
-    )
+    await update.callback_query.message.reply_text("🛑 Stop signal sent.")
 
 
 async def cb_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -294,7 +278,7 @@ async def cb_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── /debug command ───────────────────────────────────────────────────────────
+# ── /debug ────────────────────────────────────────────────────────────────────
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
@@ -305,19 +289,16 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     exploit = sessions[cid]["exploit"]
     msg     = await update.message.reply_text("🔍 Running debug test PUT...")
 
-    # Step 1: get state
     state = await asyncio.to_thread(exploit.get_state)
     if not state["success"]:
-        await msg.edit_text(f"❌ GET /api/save failed: `{state}`", parse_mode="Markdown")
+        await msg.edit_text(f"❌ GET failed: `{state}`", parse_mode="Markdown")
         return
 
     game       = state["game"]
     updated_at = state["updatedAt"]
     balance    = game.get("money", 0)
 
-    # Step 2: fire one raw PUT with +100 and capture full response
     import copy as _copy
-    import json  as _json
 
     test_game = _copy.deepcopy(game)
     test_game["money"] = balance + 100
@@ -332,53 +313,43 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     def raw_put():
         try:
             r = exploit.session.put(
-                f"{exploit.session.base_url if hasattr(exploit.session,'base_url') else 'https://lagoslife.app'}/api/save",
-                json=payload,
-                timeout=15,
+                f"{BASE_URL}/api/save", json=payload, timeout=15
             )
             return {
                 "status"  : r.status_code,
                 "headers" : dict(r.headers),
-                "body"    : r.text[:800],
+                "body"    : r.text[:600],
             }
         except Exception as e:
             return {"error": str(e)}
 
-    # need BASE_URL in scope
-    from config import BASE_URL as _BASE
-    def raw_put2():
-        try:
-            r = exploit.session.put(f"{_BASE}/api/save", json=payload, timeout=15)
-            return {
-                "status"  : r.status_code,
-                "headers" : dict(r.headers),
-                "body"    : r.text[:800],
-            }
-        except Exception as e:
-            return {"error": str(e)}
+    result  = await asyncio.to_thread(raw_put)
+    cookies = exploit.get_cookies()
 
-    result = await asyncio.to_thread(raw_put2)
+    status   = result.get("status", "ERR")
+    body     = result.get("body", result.get("error", "no body"))
+    cf_ray   = result.get("headers", {}).get("cf-ray", "none")
+    server   = result.get("headers", {}).get("server", "none")
 
-    status  = result.get("status", "ERR")
-    body    = result.get("body",   result.get("error", "no body"))
-    cf_ray  = result.get("headers", {}).get("cf-ray", "none")
-    cf_cache= result.get("headers", {}).get("cf-cache-status", "none")
-    server  = result.get("headers", {}).get("server", "none")
+    cookie_summary = "\n".join(
+        f"  `{k}`: `{str(v)[:30]}...`" if len(str(v)) > 30 else f"  `{k}`: `{v}`"
+        for k, v in cookies.items()
+    ) or "none"
 
     report = (
         f"🔍 *Debug PUT Result*\n\n"
-        f"GET balance: `₦{balance:,}`\n"
-        f"updatedAt:   `{updated_at}`\n\n"
-        f"PUT status:  `{status}`\n"
-        f"CF-Ray:      `{cf_ray}`\n"
-        f"CF-Cache:    `{cf_cache}`\n"
-        f"Server:      `{server}`\n\n"
-        f"Body:\n`{body[:600]}`"
+        f"Balance:    `₦{balance:,}`\n"
+        f"updatedAt:  `{updated_at}`\n\n"
+        f"PUT status: `{status}`\n"
+        f"CF-Ray:     `{cf_ray}`\n"
+        f"Server:     `{server}`\n\n"
+        f"*Cookies we have:*\n{cookie_summary}\n\n"
+        f"*Body:*\n`{body[:400]}`"
     )
     await msg.edit_text(report, parse_mode="Markdown")
 
 
-# ── health check server (for UptimeRobot + Render) ───────────────────────────
+# ── health check ──────────────────────────────────────────────────────────────
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -387,13 +358,13 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
-        pass  # silence access logs
+        pass
 
 
 def start_health_server():
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"Health check running on port {port}")
+    print(f"Health check on port {port}")
     server.serve_forever()
 
 
@@ -430,10 +401,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_stop,      pattern="^stop_inject$"))
     app.add_handler(CallbackQueryHandler(cb_cancel,    pattern="^cancel$"))
 
-    # Start health check server in background (for Render + UptimeRobot)
     threading.Thread(target=start_health_server, daemon=True).start()
-
-    print("Bot is running...")
+    print("Bot running...")
     app.run_polling()
 
 
