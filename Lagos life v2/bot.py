@@ -294,6 +294,90 @@ async def cb_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ── /debug command ───────────────────────────────────────────────────────────
+
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    if cid not in sessions:
+        await update.message.reply_text("Not logged in. /start first.")
+        return
+
+    exploit = sessions[cid]["exploit"]
+    msg     = await update.message.reply_text("🔍 Running debug test PUT...")
+
+    # Step 1: get state
+    state = await asyncio.to_thread(exploit.get_state)
+    if not state["success"]:
+        await msg.edit_text(f"❌ GET /api/save failed: `{state}`", parse_mode="Markdown")
+        return
+
+    game       = state["game"]
+    updated_at = state["updatedAt"]
+    balance    = game.get("money", 0)
+
+    # Step 2: fire one raw PUT with +100 and capture full response
+    import copy as _copy
+    import json  as _json
+
+    test_game = _copy.deepcopy(game)
+    test_game["money"] = balance + 100
+    stats = test_game.get("stats", {})
+    for k in ("earnedToday", "earnedTotal"):
+        if k in stats:
+            stats[k] = (stats.get(k) or 0) + 100
+    test_game["stats"] = stats
+
+    payload = {"game": test_game, "base": updated_at, "build": "prod"}
+
+    def raw_put():
+        try:
+            r = exploit.session.put(
+                f"{exploit.session.base_url if hasattr(exploit.session,'base_url') else 'https://lagoslife.app'}/api/save",
+                json=payload,
+                timeout=15,
+            )
+            return {
+                "status"  : r.status_code,
+                "headers" : dict(r.headers),
+                "body"    : r.text[:800],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    # need BASE_URL in scope
+    from config import BASE_URL as _BASE
+    def raw_put2():
+        try:
+            r = exploit.session.put(f"{_BASE}/api/save", json=payload, timeout=15)
+            return {
+                "status"  : r.status_code,
+                "headers" : dict(r.headers),
+                "body"    : r.text[:800],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    result = await asyncio.to_thread(raw_put2)
+
+    status  = result.get("status", "ERR")
+    body    = result.get("body",   result.get("error", "no body"))
+    cf_ray  = result.get("headers", {}).get("cf-ray", "none")
+    cf_cache= result.get("headers", {}).get("cf-cache-status", "none")
+    server  = result.get("headers", {}).get("server", "none")
+
+    report = (
+        f"🔍 *Debug PUT Result*\n\n"
+        f"GET balance: `₦{balance:,}`\n"
+        f"updatedAt:   `{updated_at}`\n\n"
+        f"PUT status:  `{status}`\n"
+        f"CF-Ray:      `{cf_ray}`\n"
+        f"CF-Cache:    `{cf_cache}`\n"
+        f"Server:      `{server}`\n\n"
+        f"Body:\n`{body[:600]}`"
+    )
+    await msg.edit_text(report, parse_mode="Markdown")
+
+
 # ── health check server (for UptimeRobot + Render) ───────────────────────────
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -338,6 +422,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(login_conv)
     app.add_handler(amount_conv)
     app.add_handler(CallbackQueryHandler(cb_balance,   pattern="^balance$"))
