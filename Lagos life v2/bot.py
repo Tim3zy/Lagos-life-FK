@@ -310,42 +310,56 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     payload = {"game": test_game, "base": updated_at, "build": "prod"}
 
-    def raw_put():
-        try:
-            r = exploit.session.put(
-                f"{BASE_URL}/api/save", json=payload, timeout=15
-            )
-            return {
-                "status"  : r.status_code,
-                "headers" : dict(r.headers),
-                "body"    : r.text[:600],
-            }
-        except Exception as e:
-            return {"error": str(e)}
+    def do_two_puts():
+        results = []
+        current_ts = updated_at
+        current_game = test_game
+        for i in range(2):
+            try:
+                r = exploit.session.put(
+                    f"{BASE_URL}/api/save",
+                    json={"game": current_game, "base": current_ts, "build": "prod"},
+                    timeout=15,
+                )
+                body = r.text[:400]
+                results.append({
+                    "attempt" : i + 1,
+                    "status"  : r.status_code,
+                    "body"    : body,
+                    "cf_ray"  : r.headers.get("cf-ray", "none"),
+                })
+                if r.status_code == 200:
+                    resp = r.json()
+                    current_ts = resp.get("updatedAt", current_ts)
+            except Exception as e:
+                results.append({"attempt": i + 1, "error": str(e)})
+            time.sleep(0.5)
+        return results
 
-    result  = await asyncio.to_thread(raw_put)
+    import time
+    results = await asyncio.to_thread(do_two_puts)
     cookies = exploit.get_cookies()
 
-    status   = result.get("status", "ERR")
-    body     = result.get("body", result.get("error", "no body"))
-    cf_ray   = result.get("headers", {}).get("cf-ray", "none")
-    server   = result.get("headers", {}).get("server", "none")
-
     cookie_summary = "\n".join(
-        f"  `{k}`: `{str(v)[:30]}...`" if len(str(v)) > 30 else f"  `{k}`: `{v}`"
+        f"  `{k}`: `{str(v)[:25]}...`" if len(str(v)) > 25 else f"  `{k}`: `{v}`"
         for k, v in cookies.items()
     ) or "none"
 
-    report = (
-        f"🔍 *Debug PUT Result*\n\n"
-        f"Balance:    `₦{balance:,}`\n"
-        f"updatedAt:  `{updated_at}`\n\n"
-        f"PUT status: `{status}`\n"
-        f"CF-Ray:     `{cf_ray}`\n"
-        f"Server:     `{server}`\n\n"
-        f"*Cookies we have:*\n{cookie_summary}\n\n"
-        f"*Body:*\n`{body[:400]}`"
-    )
+    lines = [
+        f"🔍 *Debug — 2x PUT Test*\n",
+        f"Balance: `₦{balance:,}` | updatedAt: `{updated_at}`\n",
+        f"*Cookies:*\n{cookie_summary}\n",
+    ]
+    for r in results:
+        if "error" in r:
+            lines.append(f"*PUT {r['attempt']}:* `ERR {r['error'][:100]}`")
+        else:
+            lines.append(
+                f"*PUT {r['attempt']}:* `{r['status']}` | CF: `{r['cf_ray']}`\n"
+                f"`{r['body'][:200]}`"
+            )
+
+    report = "\n".join(lines)
     await msg.edit_text(report, parse_mode="Markdown")
 
 
