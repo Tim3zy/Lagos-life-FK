@@ -66,12 +66,16 @@ async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sessions[cid] = {"exploit": exploit, "target": 0}
 
     # Show which cookies we got
-    got = [c for c in ("ll_session", "ll_pass", "ll_dev", "ll_vid") if c in cookies]
-    missing = [c for c in ("ll_session", "ll_pass", "ll_dev", "ll_vid") if c not in cookies]
+    all_four = ("ll_session", "ll_pass", "ll_dev", "ll_vid")
+    got     = [c for c in all_four if c in cookies]
+    missing = [c for c in all_four if c not in cookies]
 
-    cookie_line = f"Cookies: `{', '.join(got)}`"
-    if missing:
-        cookie_line += f"\n⚠️ Missing: `{', '.join(missing)}`"
+    if not missing:
+        cookie_line = "✅ All 4 cookies present"
+    else:
+        cookie_line = f"Cookies: `{', '.join(got)}`"
+        if missing:
+            cookie_line += f"\n⚠️ Missing: `{', '.join(missing)}`"
 
     kb = [[
         InlineKeyboardButton("💉 Set Amount & Inject", callback_data="setamount"),
